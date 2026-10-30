@@ -10,6 +10,7 @@
 //  - GET 带 credentials:include 读取【明文正文并提取账户字段 customerId】，满足缺口1
 //  - 会话凭证由浏览器随 credentials:include 自动附加（证据见 DevTools Network 的 Cookie 请求头，非本页 document.cookie），满足缺口3
 const TARGETS = [
+  'https://account.lenovo.com/ai/zh-cn/account/home.html',
   'https://account.lenovo.com/us/en/account/home.html',
   'https://account.motorola.com/us/en/account/home.html'
 ];
